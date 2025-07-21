@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Milky Way Galaxy</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; color: white; font-family: sans-serif; }
+        canvas { display: block; }
+        #infoBox {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background-color: rgba(0, 0, 0, 0.7);
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 12px;
+            display: none; /* Hidden by default */
+        }
+        #instructions {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            background-color: rgba(0, 0, 0, 0.7);
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div id="infoBox">Star Information Placeholder</div>
+    <div id="instructions">
+        Controls: <br>
+        - Left Mouse Button + Drag: Rotate <br>
+        - Right Mouse Button + Drag: Pan <br>
+        - Mouse Wheel: Zoom <br>
+        - Hover over stars for basic info (index/position)
+    </div>
+
+    <!-- Three.js CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- OrbitControls CDN (must be compatible with the Three.js version) -->
+    <script src="https://unpkg.com/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+    <script>
+        // --- Global Variables ---
+        let scene, camera, renderer, controls;
+        let galaxyParticles, haloParticles;
+        let clock = new THREE.Clock();
+        let raycaster = new THREE.Raycaster();
+        let pointer = new THREE.Vector2();
+        let intersectedParticleIndex = -1; // Track hovered particle index
+        const infoBox = document.getElementById('infoBox');
+
+        // --- Parameters ---
+        const galaxyParams = {
+            starCount: 100000,
+            haloCount: 20000,
+            galaxyRadius: 50,
+            bulgeRadius: 8,
+            armCount: 4,
+            armRotation: 0.4, // How tightly arms spiral
+            armWidth: 0.3,   // Randomness factor affecting arm thickness
+            diskThickness: 1.5, // Thickness of the galactic disk
+            haloRadius: 80,
+            rotationSpeed: 0.01,
+            particleSize: 0.15,
+            coreColor: new THREE.Color(0xfff5d1), // Yellowish-white
+            armColor1: new THREE.Color(0xffc98f), // Orangey
+            armColor2: new THREE.Color(0x99ccff), // Bluish
+            haloColor: new THREE.Color(0xaaaaee), // Dim blue/purple
+        };
+
+        // --- Initialization ---
+        function init() {
+            // Scene
+            scene = new THREE.Scene();
+
+            // Camera
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, galaxyParams.haloRadius * 3);
+            camera.position.set(0, galaxyParams.galaxyRadius * 0.6, galaxyParams.galaxyRadius * 1.2); // Start slightly above and zoomed out
+            camera.lookAt(scene.position);
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setClearColor(0x000005); // Deep space blue/black
+            document.body.appendChild(renderer.domElement);
+
+            // Lighting (Ambient only, as PointsMaterial doesn't react to directional lights by default)
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.2);
+            scene.add(ambientLight);
+
+            // Controls
+            setupControls();
+
+            // Create Galaxy Components
+            galaxyParticles = createGalaxy(galaxyParams.starCount);
+            scene.add(galaxyParticles);
+
+            haloParticles = createHalo(galaxyParams.haloCount);
+            scene.add(haloParticles);
+
+            // Background Stars (simple version)
+            createBackgroundStars(5000); // Add some distant static stars
+
+            // Event Listeners
+            setupEventListeners();
+
+            // Start Animation Loop
+            animate();
+        }
+
+        // --- Scene Setup Functions ---
+
+        function setupControls() {
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true; // Smooths out camera movement
+            controls.dampingFactor = 0.05;
+            controls.screenSpacePanning = false; // Prevents panning off target
+            controls.maxDistance = galaxyParams.haloRadius * 2.5;
+            controls.minDistance = 1;
+            controls.target.set(0, 0, 0); // Ensure controls target the galaxy center
+        }
+
+        function createParticleMaterial(size, isHalo = false) {
+            // Create a simple circular texture programmatically
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = 64;
+            canvas.height = 64;
+            const gradient = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+            gradient.addColorStop(0, 'rgba(255, 255, 255, 1)');
+            gradient.addColorStop(0.3, 'rgba(255, 255, 255, 0.8)');
+            gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, 64, 64);
+            const texture = new THREE.CanvasTexture(canvas);
+
+            return new THREE.PointsMaterial({
+                size: size,
+                map: texture,
+                sizeAttenuation: true, // Points smaller further away
+                vertexColors: true,    // Use colors defined in geometry
+                blending: THREE.AdditiveBlending, // Brighten where stars overlap (core effect)
+                transparent: true,
+                depthWrite: false,     // Helps with blending artifacts
+                opacity: isHalo ? 0.6 : 1.0 // Make halo stars slightly dimmer
+            });
+        }
+
+        function createGalaxy(count) {
+            const positions = new Float32Array(count * 3);
+            const colors = new Float32Array(count * 3);
+
+            for (let i = 0; i < count; i++) {
+                const idx = i * 3;
+
+                // Distance from center (more stars closer to center)
+                let r = Math.random() * galaxyParams.galaxyRadius;
+                // Apply power law for density (more stars closer in)
+                r = Math.pow(r / galaxyParams.galaxyRadius, 1.5) * galaxyParams.galaxyRadius;
+
+                // Angle
+                let theta = Math.random() * Math.PI * 2;
+
+                // Spiral Arms
+                const armIndex = Math.floor(Math.random() * galaxyParams.armCount);
+                const baseArmAngle = (armIndex / galaxyParams.armCount) * Math.PI * 2;
+                const armOffset = (r / galaxyParams.galaxyRadius) * galaxyParams.armRotation * Math.PI * 2;
+                theta = baseArmAngle + armOffset;
+
+                // Add randomness to arm position
+                const randomRadius = (Math.random() - 0.5) * galaxyParams.armWidth * (galaxyParams.galaxyRadius - r) * 0.5; // Wider arms further out
+                const randomAngle = (Math.random() - 0.5) * (galaxyParams.armWidth / (r + 1)) * 0.5; // Tighter angle variance near center
+
+                r += randomRadius;
+                theta += randomAngle;
+
+                // Position (Cartesian Coordinates)
+                positions[idx] = Math.cos(theta) * r; // x
+                positions[idx + 1] = (Math.random() - 0.5) * galaxyParams.diskThickness * Math.exp(-r * 0.1); // y (thickness decreases further out)
+                positions[idx + 2] = Math.sin(theta) * r; // z
+
+                // Color - Mix between core and arm colors based on radius
+                const coreMixFactor = Math.max(0, 1 - r / galaxyParams.bulgeRadius);
+                const armColor = (i % 2 === 0) ? galaxyParams.armColor1 : galaxyParams.armColor2; // Alternate arm colors slightly
+                const finalColor = new THREE.Color().lerpColors(armColor, galaxyParams.coreColor, coreMixFactor);
+
+                // Introduce slight random color variations
+                finalColor.multiplyScalar(0.9 + Math.random() * 0.2);
+
+                colors[idx] = finalColor.r;
+                colors[idx + 1] = finalColor.g;
+                colors[idx + 2] = finalColor.b;
+
+
+                // Galactic Bulge/Core - Add extra concentration
+                 if (Math.random() < 0.2) { // 20% chance to potentially be a bulge star instead
+                    const bulgeR = Math.random() * galaxyParams.bulgeRadius;
+                    const bulgeTheta = Math.random() * Math.PI * 2;
+                    const bulgePhi = Math.acos((Math.random() * 2) - 1); // Spherical distribution
+
+                    positions[idx]     = Math.sin(bulgePhi) * Math.cos(bulgeTheta) * bulgeR;
+                    positions[idx + 1] = Math.cos(bulgePhi) * bulgeR * 0.6; // Slightly flattened bulge
+                    positions[idx + 2] = Math.sin(bulgePhi) * Math.sin(bulgeTheta) * bulgeR;
+
+                    // Make bulge stars brighter/whiter on average
+                    const bulgeColorFactor = 0.5 + Math.random() * 0.5; // 0.5 to 1.0
+                    colors[idx] = THREE.MathUtils.lerp(armColor.r, galaxyParams.coreColor.r, bulgeColorFactor);
+                    colors[idx+1] = THREE.MathUtils.lerp(armColor.g, galaxyParams.coreColor.g, bulgeColorFactor);
+                    colors[idx+2] = THREE.MathUtils.lerp(armColor.b, galaxyParams.coreColor.b, bulgeColorFactor);
+                 }
+            }
+
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+            const material = createParticleMaterial(galaxyParams.particleSize);
+
+            return new THREE.Points(geometry, material);
+        }
+
+        function createHalo(count) {
+            const positions = new Float32Array(count * 3);
+            const colors = new Float32Array(count * 3);
+            const baseColor = galaxyParams.haloColor;
+
+            for (let i = 0; i < count; i++) {
+                const idx = i * 3;
+
+                // Spherical distribution using Fibonacci sphere (more uniform than random) or simple random spherical
+                const radius = galaxyParams.bulgeRadius + Math.random() * (galaxyParams.haloRadius - galaxyParams.bulgeRadius);
+                const phi = Math.acos((Math.random() * 2) - 1); // Angle from Y+ axis
+                const theta = Math.random() * Math.PI * 2;      // Angle around Y axis
+
+                positions[idx] = Math.sin(phi) * Math.cos(theta) * radius; // x
+                positions[idx + 1] = Math.cos(phi) * radius;                // y
+                positions[idx + 2] = Math.sin(phi) * Math.sin(theta) * radius; // z
+
+                // Color - Dimmer and slightly varied halo color
+                const variation = 0.8 + Math.random() * 0.4; // 0.8 to 1.2
+                colors[idx] = baseColor.r * variation;
+                colors[idx + 1] = baseColor.g * variation;
+                colors[idx + 2] = baseColor.b * variation;
+            }
+
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+            const material = createParticleMaterial(galaxyParams.particleSize * 1.2, true); // Slightly larger but dimmer
+
+            return new THREE.Points(geometry, material);
+        }
+
+        function createBackgroundStars(count) {
+            const positions = new Float32Array(count * 3);
+            const colors = new Float32Array(count * 3);
+            const farDist = galaxyParams.haloRadius * 2.5; // Place background stars far away
+
+            for (let i = 0; i < count; i++) {
+                const idx = i * 3;
+
+                // Random spherical coordinates, normalized and scaled to far distance
+                const u = Math.random();
+                const v = Math.random();
+                const theta = 2 * Math.PI * u;
+                const phi = Math.acos(2 * v - 1);
+
+                positions[idx] = farDist * Math.sin(phi) * Math.cos(theta);
+                positions[idx + 1] = farDist * Math.sin(phi) * Math.sin(theta);
+                positions[idx + 2] = farDist * Math.cos(phi);
+
+                 // Simple white color for background stars
+                 const brightness = 0.7 + Math.random() * 0.3;
+                 colors[idx] = brightness;
+                 colors[idx+1] = brightness;
+                 colors[idx+2] = brightness;
+            }
+
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+            const material = new THREE.PointsMaterial({
+                size: 1.5, // Larger apparent size because they are 'distant'
+                sizeAttenuation: false, // Constant size regardless of distance
+                vertexColors: true,
+                blending: THREE.AdditiveBlending,
+                transparent: true,
+                opacity: 0.5,
+                depthWrite: false
+            });
+
+            const bgStars = new THREE.Points(geometry, material);
+            scene.add(bgStars);
+        }
+
+        // --- Animation and Interaction ---
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const delta = clock.getDelta();
+
+            // Update controls
+            controls.update();
+
+            // Rotate the galaxy disk (simple uniform rotation)
+            if (galaxyParticles) {
+                galaxyParticles.rotation.y += galaxyParams.rotationSpeed * delta;
+            }
+            // Optionally rotate halo slower or not at all
+             if (haloParticles) {
+                 haloParticles.rotation.y += galaxyParams.rotationSpeed * 0.5 * delta;
+             }
+
+            // Handle interactions (like hover) - checked in pointer move event
+            updateInfoBox();
+
+            // Render the scene
+            renderer.render(scene, camera);
+        }
+
+        function setupEventListeners() {
+            window.addEventListener('resize', onWindowResize);
+            window.addEventListener('pointermove', onPointerMove);
+            // Add click listener if needed later
+            // window.addEventListener('click', onClick);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function onPointerMove(event) {
+            // Calculate pointer position in normalized device coordinates (-1 to +1)
+            pointer.x = (event.clientX / window.innerWidth) * 2 - 1;
+            pointer.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            findIntersections();
+        }
+
+        function findIntersections() {
+             if (!galaxyParticles) return; // Ensure galaxy exists
+
+            raycaster.setFromCamera(pointer, camera);
+            // Adjust threshold for Points - smaller means pointer needs to be closer
+            raycaster.params.Points.threshold = 0.2;
+
+            const intersectsGalaxy = raycaster.intersectObject(galaxyParticles);
+            const intersectsHalo = raycaster.intersectObject(haloParticles);
+
+            const allIntersects = [...intersectsGalaxy, ...intersectsHalo];
+            allIntersects.sort((a, b) => a.distanceToRay - b.distanceToRay); // Sort by distance
+
+            if (allIntersects.length > 0) {
+                const firstIntersection = allIntersects[0];
+                // `index` property gives the index of the intersected point in the geometry
+                if (firstIntersection.index !== undefined && firstIntersection.index !== intersectedParticleIndex) {
+                    intersectedParticleIndex = firstIntersection.index;
+                    // Get position data for the info box
+                    const positions = firstIntersection.object.geometry.attributes.position;
+                    const x = positions.getX(intersectedParticleIndex).toFixed(2);
+                    const y = positions.getY(intersectedParticleIndex).toFixed(2);
+                    const z = positions.getZ(intersectedParticleIndex).toFixed(2);
+                    infoBox.textContent = `Star Index: ${intersectedParticleIndex}\nPosition (approx): (${x}, ${y}, ${z})`;
+                    infoBox.style.display = 'block';
+                }
+            } else {
+                if (intersectedParticleIndex !== -1) {
+                    // No intersection, hide info box
+                    intersectedParticleIndex = -1;
+                    infoBox.style.display = 'none';
+                }
+            }
+        }
+
+        function updateInfoBox() {
+             if (infoBox.style.display === 'block') {
+                 // Keep info box near cursor (optional, can be performance intensive)
+                 // infoBox.style.left = `${event.clientX + 15}px`;
+                 // infoBox.style.top = `${event.clientY + 15}px`;
+                 // Simpler: just leave it at top-left when visible
+             }
+        }
+
+
+        // --- Start the application ---
+        init();
+
+    </script>
+</body>
+</html>
